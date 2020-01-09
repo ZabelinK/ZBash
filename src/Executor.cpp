@@ -1,9 +1,11 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h> 
 #include <fcntl.h>
 
 #include <stdexcept>
+#include <iostream>
 
 #include "Executor.hpp"
 #include "Command.hpp"
@@ -12,75 +14,84 @@ Executor::Executor(const std::initializer_list<command_t>& commands) :
     commands_(commands.begin(), commands.end())
 {}
 
-int Executor::exec()
+bool Executor::isLastCommand(const commands_t::iterator& cmd)
 {
-    _exec_next(commands_.begin());
+    return (cmd + 1) == commands_.end();
 }
 
-int Executor::_exec_next(commands_t::iterator next_cmd)
+int Executor::exec()
 {
-    int file, chield_pid, pipefd[2], curr_input;
+    int rc = 0;
+    int input_pipe[2] = {-1, -1}, output_pipe[2] = {-1, -1};
+    unsigned int chield_cnt = 0;
 
-    if (next_cmd == commands_.end()) {
-        return 0;
+    for (commands_t::iterator command = commands_.begin();
+         command != commands_.end();
+         ++command) {
+
+        close(input_pipe[0]);
+        close(input_pipe[1]);
+        input_pipe[0] = output_pipe[0];
+        input_pipe[1] = output_pipe[1];
+        output_pipe[0] = -1;
+        output_pipe[1] = -1;
+
+        if (!isLastCommand(command)) {
+            if (pipe(output_pipe) < 0) {
+                std::cerr << "Can't create pipe errno - " << errno << '\n';
+                exit(1);
+            }
+        }
+
+        if ((rc = fork()) == 0) {
+            int in_fd, out_fd;
+            if (input_pipe[0] != -1) {
+                dup2(input_pipe[0], STDIN_FILENO);
+                close(input_pipe[0]);
+                close(input_pipe[1]);
+            }
+
+            if (output_pipe[0] != -1) {
+                dup2(output_pipe[1], STDOUT_FILENO);
+                close(output_pipe[0]);
+                close(output_pipe[1]);
+            }
+
+            if (command->input) {
+                int file_fd = open(command->input, O_RDONLY);
+                if (file_fd < 0) {
+                    std::cerr << "Can't open file on read, errno - " << errno << '\n';
+                    exit(1);
+                }
+                dup2(file_fd, STDIN_FILENO);
+                close(file_fd);
+            }
+
+            if (command->output) {
+                int file_fd = open(command->output, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (file_fd < 0) {
+                    std::cerr << "Can't open/create file on write, errno - " << errno << '\n';
+                    exit(1);
+                }
+                dup2(file_fd, STDOUT_FILENO);
+                close(file_fd);
+            }
+
+            execv(command->path, command->args);
+        } else if (rc < 0) {
+            std::cerr << "Can't create chield proccess, errno - " << errno << '\n';
+            exit(1);
+        }
+
+        ++chield_cnt;
     }
 
-    switch (next_cmd->type)
-    {
-    case LT_COMMAND:
-        if ((chield_pid = fork()) != 0) {
-            return chield_pid;
-        }
-        break;
-    case LT_IN_REDIRECT:
-        if ((file = open(next_cmd->filename, O_RDONLY)) < 0) {
-            throw std::runtime_error("Can't open file " + next_cmd->filename);
-        }
+    close(input_pipe[0]);
+    close(input_pipe[1]);
+    close(output_pipe[0]);
+    close(output_pipe[1]);
 
-        dup2(STDIN_FILENO, file);
-        close(file);
-        break;
-    case LT_OUT_REDIRECT:
-        if ((file = open(next_cmd->filename, O_WRONLY | O_CREAT | O_TRUNC)) < 0) {
-            throw std::runtime_error("Can't open file " + next_cmd->filename);
-        }
-        dup2(STDOUT_FILENO, file);
-        close(file);
-        break;
-
-    case LT_PIPE:
-        if (pipe(pipefd) < 0) {
-            throw std::runtime_error("Can't open pipe");
-        }
-
-        curr_input = dup(STDIN_FILENO);
-        dup2(STDIN_FILENO, pipefd[1]);
-        close(pipefd[1]);
-        break;
-    default:
-        throw std::runtime_error("Invalid cmd type");
+    while (chield_cnt-- > 0) {
+        wait(NULL);
     }
-
-    _exec_next(next_cmd + 1);
-
-    switch (next_cmd->type)
-    {
-    case LT_COMMAND:
-        execv(next_cmd->command, next_cmd->args);
-        break;
-    case LT_IN_REDIRECT:
-    case LT_OUT_REDIRECT:
-        break;
-
-    case LT_PIPE:
-        dup2(STDIN_FILENO, curr_input);
-        close(curr_input);
-        dup2(STDOUT_FILENO, pipefd[0]);
-        close(pipefd[0]);
-        break;
-    default:
-        throw std::runtime_error("Invalid cmd type");
-    }
-
-    return 0;
 }

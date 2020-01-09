@@ -7,7 +7,13 @@
 
 #include "Command.hpp"
 
-using command_t = lexem_t;
+struct command_t {
+    char*  path;
+    char** args;
+    char*  input;
+    char*  output;
+};
+
 using commands_t = std::vector<command_t>;
 
 class Executor {
@@ -17,8 +23,8 @@ public:
     int exec();
 
 private:
-    int _exec_next(commands_t::iterator);
     commands_t commands_;
+    bool isLastCommand(const commands_t::iterator&);
 };
 
 #endif
